@@ -1,0 +1,14 @@
+builds:
+  - id: leonai
+    binary: leonai
+    main: ./cmd/leonai
+    goarch:
+      - amd64
+      - arm64
+      - arm
+archives:
+  - id: leonai
+    builds:
+      - leonai
+    format: zip
+    name_template: 'leonai_{{ .Version }}_{{- if eq .Os "darwin" }}macos{{- else }}{{ .Os }}{{ end }}_{{ .Arch }}'
