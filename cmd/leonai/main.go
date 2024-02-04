@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -44,8 +43,7 @@ func newCommand() *ffcli.Command {
 		},
 		Subcommands: []*ffcli.Command{
 			newVersionCommand(),
-			newServeCommand(),
-			newRunCommand(),
+			newVideoCommand(),
 		},
 	}
 }
@@ -78,12 +76,23 @@ func newVersionCommand() *ffcli.Command {
 	}
 }
 
-func newServeCommand() *ffcli.Command {
-	cmd := "serve"
+func newVideoCommand() *ffcli.Command {
+	cmd := "video"
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	_ = fs.String("config", "", "config file (optional)")
 
-	port := fs.Int("port", 0, "port number")
+	cfg := &leonai.Config{}
+	fs.StringVar(&cfg.Cookie, "cookie", "", "cookie file")
+	fs.StringVar(&cfg.Proxy, "proxy", "", "proxy")
+	fs.DurationVar(&cfg.Wait, "wait", 0, "wait time")
+	fs.BoolVar(&cfg.Debug, "debug", false, "debug mode")
+
+	var image string
+	fs.StringVar(&image, "image", "", "image to use")
+	var motionStrength int
+	fs.IntVar(&motionStrength, "motion-strength", 5, "motion strength")
+	var output string
+	fs.StringVar(&output, "output", "", "output file")
 
 	return &ffcli.Command{
 		Name:       cmd,
@@ -96,31 +105,7 @@ func newServeCommand() *ffcli.Command {
 		ShortHelp: fmt.Sprintf("leonai %s command", cmd),
 		FlagSet:   fs,
 		Exec: func(ctx context.Context, args []string) error {
-			if *port == 0 {
-				return errors.New("missing port")
-			}
-			return leonai.Serve(ctx, *port)
-		},
-	}
-}
-
-func newRunCommand() *ffcli.Command {
-	cmd := "run"
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	_ = fs.String("config", "", "config file (optional)")
-
-	return &ffcli.Command{
-		Name:       cmd,
-		ShortUsage: fmt.Sprintf("leonai %s [flags] <key> <value data...>", cmd),
-		Options: []ff.Option{
-			ff.WithConfigFileFlag("config"),
-			ff.WithConfigFileParser(ff.PlainParser),
-			ff.WithEnvVarPrefix("LEONAI"),
-		},
-		ShortHelp: fmt.Sprintf("leonai %s command", cmd),
-		FlagSet:   fs,
-		Exec: func(ctx context.Context, args []string) error {
-			return leonai.Run(ctx)
+			return leonai.GenerateVideo(ctx, cfg, image, motionStrength, output)
 		},
 	}
 }
