@@ -132,7 +132,8 @@ func (c *Client) Auth(ctx context.Context) error {
 		return err
 	}
 	c.token = token
-	c.tokenExpiration = expiration
+	// Set token expiration to 90% of the actual expiration
+	c.tokenExpiration = time.Now().Add(expiration.Sub(time.Now().UTC()) * 90 / 100).UTC()
 	return nil
 }
 
