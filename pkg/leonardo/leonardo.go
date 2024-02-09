@@ -200,7 +200,7 @@ func toClaims(token string) (*claims, error) {
 
 func (c *Client) session(ctx context.Context) (string, time.Time, error) {
 	var resp sessionResponse
-	if err := c.do(ctx, "GET", "api/auth/session", nil, &resp); err != nil {
+	if _, err := c.do(ctx, "GET", "api/auth/session", nil, &resp); err != nil {
 		return "", time.Time{}, fmt.Errorf("leonardo: couldn't get session: %w", err)
 	}
 	if resp.AccessToken == "" {
@@ -266,7 +266,7 @@ func (c *Client) user(ctx context.Context, sub string) (string, error) {
 	}
 
 	var resp userResponse
-	if err := c.do(ctx, "POST", "graphql", req, &resp); err != nil {
+	if _, err := c.do(ctx, "POST", "graphql", req, &resp); err != nil {
 		return "", err
 	}
 	if len(resp.Data.Users) == 0 {
@@ -350,7 +350,7 @@ func (c *Client) Upload(ctx context.Context, path string) (string, error) {
 	}
 
 	var resp createUploadResponse
-	if err := c.do(ctx, "POST", "graphql", req, &resp); err != nil {
+	if _, err := c.do(ctx, "POST", "graphql", req, &resp); err != nil {
 		return "", err
 	}
 
@@ -421,7 +421,7 @@ func (c *Client) Upload(ctx context.Context, path string) (string, error) {
 		writer: writer,
 		data:   &buf,
 	}
-	if err := c.do(ctx, "POST", u, f, nil); err != nil {
+	if _, err := c.do(ctx, "POST", u, f, nil); err != nil {
 		return "", err
 	}
 	return resp.Data.UploadInitImage.ID, nil
@@ -531,7 +531,7 @@ func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int
 	}
 
 	var createResp createGenerationResponse
-	if err := c.do(ctx, "POST", "graphql", createReq, &createResp); err != nil {
+	if _, err := c.do(ctx, "POST", "graphql", createReq, &createResp); err != nil {
 		return "", "", fmt.Errorf("leonardo: couldn't create motion: %w", err)
 	}
 	generationID := createResp.Data.MotionSVDGenerationJob.GenerationID
@@ -565,16 +565,20 @@ func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int
 	}
 
 	var gen generation
+	var last []byte
 	for {
 		select {
 		case <-ctx.Done():
+			log.Println("leonardo: context done, last response:", string(last))
 			return "", "", ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
 		var feedResp feedResponse
-		if err := c.do(ctx, "POST", "graphql", feedReq, &feedResp); err != nil {
+		b, err := c.do(ctx, "POST", "graphql", feedReq, &feedResp)
+		if err != nil {
 			return "", "", fmt.Errorf("leonardo: couldn't get feed: %w", err)
 		}
+		last = b
 		if len(feedResp.Data.Generations) == 0 {
 			continue
 		}
@@ -611,7 +615,7 @@ var backoff = []time.Duration{
 	2 * time.Minute,
 }
 
-func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+func (c *Client) do(ctx context.Context, method, path string, in, out any) ([]byte, error) {
 	maxAttempts := 3
 	attempts := 0
 	var err error
@@ -619,14 +623,15 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		if err != nil {
 			log.Println("retrying...", err)
 		}
-		err = c.doAttempt(ctx, method, path, in, out)
+		var b []byte
+		b, err = c.doAttempt(ctx, method, path, in, out)
 		if err == nil {
-			return nil
+			return b, nil
 		}
 		// Increase attempts and check if we should stop
 		attempts++
 		if attempts >= maxAttempts {
-			return err
+			return nil, err
 		}
 		// If the error is temporary retry
 		var netErr net.Error
@@ -645,7 +650,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 				// Retry on these status codes
 				retry = true
 			default:
-				return err
+				return nil, err
 			}
 		}
 
@@ -655,7 +660,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 			if errAPI.code == invalidJWTCode {
 				// If the JWT is invalid we should re-authenticate
 				if err := c.Auth(ctx); err != nil {
-					return err
+					return nil, err
 				}
 			}
 			// Retry on any API error
@@ -663,7 +668,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		}
 
 		if !retry {
-			return err
+			return nil, err
 		}
 
 		// Wait before retrying
@@ -676,7 +681,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-t.C:
 		}
 	}
@@ -715,7 +720,7 @@ func (e errAPI) Error() string {
 	return e.code
 }
 
-func (c *Client) doAttempt(ctx context.Context, method, path string, in, out any) error {
+func (c *Client) doAttempt(ctx context.Context, method, path string, in, out any) ([]byte, error) {
 	var body []byte
 	var reqBody io.Reader
 	contentType := "application/json"
@@ -726,7 +731,7 @@ func (c *Client) doAttempt(ctx context.Context, method, path string, in, out any
 		var err error
 		body, err = json.Marshal(in)
 		if err != nil {
-			return fmt.Errorf("leonardo: couldn't marshal request body: %w", err)
+			return nil, fmt.Errorf("leonardo: couldn't marshal request body: %w", err)
 		}
 		reqBody = bytes.NewReader(body)
 	}
@@ -746,7 +751,7 @@ func (c *Client) doAttempt(ctx context.Context, method, path string, in, out any
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, reqBody)
 	if err != nil {
-		return fmt.Errorf("leonardo: couldn't create request: %w", err)
+		return nil, fmt.Errorf("leonardo: couldn't create request: %w", err)
 	}
 	c.addHeaders(req, path, contentType)
 
@@ -755,12 +760,12 @@ func (c *Client) doAttempt(ctx context.Context, method, path string, in, out any
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("leonardo: couldn't %s %s: %w", method, u, err)
+		return nil, fmt.Errorf("leonardo: couldn't %s %s: %w", method, u, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("leonardo: couldn't read response body: %w", err)
+		return nil, fmt.Errorf("leonardo: couldn't read response body: %w", err)
 	}
 	c.log("leonardo: response %s %s %d %s", method, path, resp.StatusCode, string(respBody))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -769,7 +774,7 @@ func (c *Client) doAttempt(ctx context.Context, method, path string, in, out any
 			errMessage = errMessage[:100] + "..."
 		}
 		_ = os.WriteFile(fmt.Sprintf("logs/debug_%s.json", time.Now().Format("20060102_150405")), respBody, 0644)
-		return fmt.Errorf("leonardo: %s %s returned (%s): %w", method, u, errMessage, errStatusCode(resp.StatusCode))
+		return nil, fmt.Errorf("leonardo: %s %s returned (%s): %w", method, u, errMessage, errStatusCode(resp.StatusCode))
 	}
 	if out != nil {
 		var errResp errorResponse
@@ -779,15 +784,15 @@ func (c *Client) doAttempt(ctx context.Context, method, path string, in, out any
 				msgs = append(msgs, fmt.Sprintf("%s (%s)", e.Message, e.Extensions.Code))
 			}
 			_ = os.WriteFile(fmt.Sprintf("logs/debug_%s.json", time.Now().Format("20060102_150405")), respBody, 0644)
-			return fmt.Errorf("leonardo: %s: %w", strings.Join(msgs, ", "), errAPI{code: errResp.Errors[0].Extensions.Code})
+			return nil, fmt.Errorf("leonardo: %s: %w", strings.Join(msgs, ", "), errAPI{code: errResp.Errors[0].Extensions.Code})
 		}
 		if err := json.Unmarshal(respBody, out); err != nil {
 			// Write response body to file for debugging.
 			_ = os.WriteFile(fmt.Sprintf("logs/debug_%s.json", time.Now().Format("20060102_150405")), respBody, 0644)
-			return fmt.Errorf("leonardo: couldn't unmarshal response body (%T): %w", out, err)
+			return nil, fmt.Errorf("leonardo: couldn't unmarshal response body (%T): %w", out, err)
 		}
 	}
-	return nil
+	return respBody, nil
 }
 
 func (c *Client) addHeaders(req *http.Request, path, contentType string) {
