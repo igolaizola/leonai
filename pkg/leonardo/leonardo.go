@@ -503,6 +503,18 @@ type generation struct {
 	Typename              string        `json:"__typename"`
 }
 
+type statusResponse struct {
+	Data struct {
+		Generations []generationStatus `json:"generations"`
+	} `json:"data"`
+}
+
+type generationStatus struct {
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Typename string `json:"__typename"`
+}
+
 func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int) (string, string, error) {
 	// Authenticate if necessary
 	if err := c.Auth(ctx); err != nil {
@@ -540,6 +552,45 @@ func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int
 		return "", "", fmt.Errorf("leonardo: couldn't get generation id")
 	}
 
+	statusReq := &graphqlRequest{
+		OperationName: "GetAIGenerationFeedStatuses",
+		Variables: map[string]any{
+			"where": map[string]any{
+				"status": map[string]any{
+					"_in": []string{"COMPLETE", "FAILED"},
+				},
+				"id": map[string]any{
+					"_in": []string{generationID},
+				},
+			},
+		},
+		Query: statusQuery,
+	}
+
+	var last []byte
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("leonardo: context done, last response:", string(last))
+			return "", "", ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+		var statusResp statusResponse
+		b, err := c.do(ctx, "POST", "graphql", statusReq, &statusResp)
+		if err != nil {
+			return "", "", fmt.Errorf("leonardo: couldn't get feed: %w", err)
+		}
+		last = b
+		if len(statusResp.Data.Generations) == 0 {
+			continue
+		}
+		s := statusResp.Data.Generations[0]
+		if s.Status != "COMPLETE" {
+			return "", "", fmt.Errorf("leonardo: generation returned status %s", s.Status)
+		}
+		break
+	}
+
 	feedReq := &graphqlRequest{
 		OperationName: "GetAIGenerationFeed",
 		Variables: map[string]any{
@@ -550,42 +601,37 @@ func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int
 				"teamId": map[string]any{
 					"_is_null": true,
 				},
-				"status": map[string]any{
-					"_in": []string{"COMPLETE", "FAILED"},
+				"canvasRequest": map[string]any{
+					"_eq": false,
 				},
-				"id": map[string]any{
-					"_in": []string{generationID},
+				"universalUpscaler": map[string]any{
+					"_is_null": true,
 				},
 				"isStoryboard": map[string]any{
 					"_eq": false,
 				},
 			},
 			"offset": 0,
+			"limit":  10,
 		},
 		Query: feedQuery,
 	}
-
-	var gen generation
-	var last []byte
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("leonardo: context done, last response:", string(last))
-			return "", "", ctx.Err()
-		case <-time.After(5 * time.Second):
-		}
-		var feedResp feedResponse
-		b, err := c.do(ctx, "POST", "graphql", feedReq, &feedResp)
-		if err != nil {
-			return "", "", fmt.Errorf("leonardo: couldn't get feed: %w", err)
-		}
-		last = b
-		if len(feedResp.Data.Generations) == 0 {
+	var feedResp feedResponse
+	if _, err := c.do(ctx, "POST", "graphql", feedReq, &feedResp); err != nil {
+		return "", "", fmt.Errorf("leonardo: couldn't get feed: %w", err)
+	}
+	if len(feedResp.Data.Generations) == 0 {
+		return "", "", errors.New("leonardo: no generations found")
+	}
+	var gen *generation
+	for _, g := range feedResp.Data.Generations {
+		if g.ID != generationID {
 			continue
 		}
-		gen = feedResp.Data.Generations[0]
+		gen = &g
 		break
 	}
+
 	if gen.Status != "COMPLETE" {
 		return "", "", fmt.Errorf("leonardo: generation returned status %s", gen.Status)
 	}
