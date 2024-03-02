@@ -578,7 +578,7 @@ func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int
 		var statusResp statusResponse
 		b, err := c.do(ctx, "POST", "graphql", statusReq, &statusResp)
 		if err != nil {
-			return "", "", fmt.Errorf("leonardo: couldn't get feed: %w", err)
+			return "", "", fmt.Errorf("leonardo: couldn't get status: %w", err)
 		}
 		last = b
 		if len(statusResp.Data.Generations) == 0 {
@@ -586,7 +586,7 @@ func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int
 		}
 		s := statusResp.Data.Generations[0]
 		if s.Status != "COMPLETE" {
-			return "", "", fmt.Errorf("leonardo: generation returned status %s", s.Status)
+			return "", "", fmt.Errorf("leonardo: status generation %s", s.Status)
 		}
 		break
 	}
@@ -616,24 +616,43 @@ func (c *Client) CreateMotion(ctx context.Context, id string, motionStrength int
 		},
 		Query: feedQuery,
 	}
-	var feedResp feedResponse
-	if _, err := c.do(ctx, "POST", "graphql", feedReq, &feedResp); err != nil {
-		return "", "", fmt.Errorf("leonardo: couldn't get feed: %w", err)
-	}
-	if len(feedResp.Data.Generations) == 0 {
-		return "", "", errors.New("leonardo: no generations found")
-	}
-	var gen *generation
-	for _, g := range feedResp.Data.Generations {
-		if g.ID != generationID {
-			continue
-		}
-		gen = &g
-		break
-	}
 
-	if gen.Status != "COMPLETE" {
-		return "", "", fmt.Errorf("leonardo: generation returned status %s", gen.Status)
+	wait := 1 * time.Second
+	var gen *generation
+	for {
+		select {
+		case <-ctx.Done():
+			return "", "", fmt.Errorf("leonardo: pending generation: %w", ctx.Err())
+		case <-time.After(wait):
+		}
+		wait = 5 * time.Second
+		var feedResp feedResponse
+		if _, err := c.do(ctx, "POST", "graphql", feedReq, &feedResp); err != nil {
+			return "", "", fmt.Errorf("leonardo: couldn't get feed: %w", err)
+		}
+		if len(feedResp.Data.Generations) == 0 {
+			return "", "", errors.New("leonardo: no generations found")
+		}
+		var candidate *generation
+		for _, g := range feedResp.Data.Generations {
+			if g.ID != generationID {
+				continue
+			}
+			candidate = &g
+			break
+		}
+		if candidate == nil {
+			return "", "", fmt.Errorf("leonardo: couldn't find generation %s", generationID)
+		}
+		switch candidate.Status {
+		case "PENDING":
+			continue
+		case "COMPLETE":
+		default:
+			return "", "", fmt.Errorf("leonardo: feed generation %s", candidate.Status)
+		}
+		gen = candidate
+		break
 	}
 	if len(gen.GeneratedImages) == 0 {
 		return "", "", fmt.Errorf("leonardo: couldn't get generated images")
