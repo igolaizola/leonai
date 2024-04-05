@@ -482,7 +482,7 @@ type generation struct {
 		ID       string `json:"id"`
 		Typename string `json:"__typename"`
 	} `json:"user"`
-	CustomModel *string `json:"custom_model"`
+	CustomModel any `json:"custom_model"`
 	InitImage   struct {
 		ID       string `json:"id"`
 		URL      string `json:"url"`
